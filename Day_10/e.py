@@ -17,12 +17,12 @@ AUDIO_FORMAT = [
     '-b', '16',     # ビット深度: 16-bit
     '-c', '1',      # チャンネル数: 1 (mono)
     '-e', 's',      # エンコーディング: signed-integer
-    '-r', '44100',  # サンプルレート: 44.1kHz
+    '-r', '48000',  # サンプルレート: 48kHz
     '-',            # 標準入出力を使用
 ]
 
 class EchoCanceller:
-    def __init__(self, sample_rate=44100, max_delay_s=0.5):
+    def __init__(self, sample_rate=48000, max_delay_s=0.5):
         self.sample_rate = sample_rate
         self.max_delay_samples = int(max_delay_s * sample_rate)
 
@@ -35,6 +35,8 @@ class EchoCanceller:
         self.estimated_delay = 0
         self.lock = threading.Lock()
         self.process_count = 0  # 処理頻度制御用
+
+        self.gain = 1
 
     def add_sent_audio(self, audio_data):
         """送信音声データを追加"""
@@ -50,9 +52,9 @@ class EchoCanceller:
             samples = struct.unpack(f'<{len(audio_data)//2}h', audio_data)
             self.received_audio_buffer.extend(samples)
 
-            # 処理頻度を下げる（100回に1回のみ実行）
+            # 処理頻度を下げる（50回に1回のみ実行）
             self.process_count += 1
-            if (self.process_count % 100 == 0 and 
+            if (self.process_count % 50 == 0 and 
                 len(self.received_audio_buffer) >= self.max_delay_samples * 2 and 
                 len(self.sent_audio_buffer) >= self.max_delay_samples * 2):
                 self.estimate_delay()
@@ -96,7 +98,60 @@ class EchoCanceller:
             self.estimated_delay = delay_samples
             delay_s = delay_samples / self.sample_rate
             correlation_strength = np.abs(correlation[max_corr_index])
-            print(f"推定遅延(FFT): {delay_s:.3f}s ({delay_samples}サンプル) 相関: {correlation_strength:.3f}")
+            self.gain = sigmoid(correlation_strength)
+            print(f"推定遅延(FFT): {delay_s:.3f}s ({delay_samples}サンプル) 相関: {correlation_strength:.3f} ゲイン: {self.gain}")
+
+def sigmoid(correlation_strength, midpoint=0.2, steepness=10):
+    sig = 1 - 1 / (1 + np.exp(-steepness * (correlation_strength - midpoint)))
+    return sig
+
+def apply_volume_limiter(data, gain):
+    sample_count = len(data) // 2
+    samples = struct.unpack(f'<{sample_count}h', data)
+    limited_samples = [int(sample * gain) for sample in samples]
+    limited_samples = [int(sample / 7) for sample in samples]
+    return struct.pack(f'<{len(limited_samples)}h', *limited_samples)
+
+def apply_volume_limiter0(audio_data):
+    """
+    音声データに音量制限を適用する
+    
+    Args:
+        audio_data (bytes): 16bit signed integer形式の音声データ
+    
+    Returns:
+        bytes: 音量制限が適用された音声データ
+    """
+    MAX_AMPLITUDE = 20000 
+    LIMITER_RATIO = 0.8
+
+    if len(audio_data) < 2:
+        return audio_data
+    
+    # バイトデータを16bit signed integerの配列に変換
+    sample_count = len(audio_data) // 2
+    samples = struct.unpack(f'<{sample_count}h', audio_data)
+    
+    # 音量制限を適用
+    limited_samples = []
+    for sample in samples:
+        # 絶対値が最大振幅を超えている場合は制限
+        if abs(sample) > MAX_AMPLITUDE:
+            # ソフトリミッティング（急激な変化を避ける）
+            if sample > 0:
+                limited_sample = int(MAX_AMPLITUDE + (sample - MAX_AMPLITUDE) * LIMITER_RATIO)
+                limited_sample = min(limited_sample, 32767)  # 16bit上限
+            else:
+                limited_sample = int(-MAX_AMPLITUDE + (sample + MAX_AMPLITUDE) * LIMITER_RATIO)
+                limited_sample = max(limited_sample, -32768)  # 16bit下限
+        else:
+            limited_sample = sample
+        
+        limited_samples.append(limited_sample)
+    
+    # 16bit signed integerの配列をバイトデータに変換
+    return struct.pack(f'<{len(limited_samples)}h', *limited_samples)
+
 
 # グローバルなエコーキャンセラーインスタンス
 echo_canceller = EchoCanceller()
@@ -114,6 +169,10 @@ def send_audio(sock):
 
             # エコーキャンセラに送信音声を記録
             echo_canceller.add_sent_audio(data)
+            gain = echo_canceller.gain
+
+            #簡易なエコーキャンセラの実装
+            data = apply_volume_limiter(data, gain)
 
             sock.sendall(data)
     except (BrokenPipeError, ConnectionResetError):
@@ -224,6 +283,6 @@ def main():
     # メインスレッドでプロット
     plot_wave(amplitudes, timestamps)
 
-
+#amplitude_recodeのプロットの謎を理解
 if __name__ == '__main__':
     main()

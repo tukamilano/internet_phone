@@ -98,6 +98,46 @@ class EchoCanceller:
             correlation_strength = np.abs(correlation[max_corr_index])
             print(f"推定遅延(FFT): {delay_s:.3f}s ({delay_samples}サンプル) 相関: {correlation_strength:.3f}")
 
+def apply_volume_limiter0(audio_data):
+    """
+    音声データに音量制限を適用する
+    
+    Args:
+        audio_data (bytes): 16bit signed integer形式の音声データ
+    
+    Returns:
+        bytes: 音量制限が適用された音声データ
+    """
+    MAX_AMPLITUDE = 20000 
+    LIMITER_RATIO = 0.8
+
+    if len(audio_data) < 2:
+        return audio_data
+    
+    # バイトデータを16bit signed integerの配列に変換
+    sample_count = len(audio_data) // 2
+    samples = struct.unpack(f'<{sample_count}h', audio_data)
+    
+    # 音量制限を適用
+    limited_samples = []
+    for sample in samples:
+        # 絶対値が最大振幅を超えている場合は制限
+        if abs(sample) > MAX_AMPLITUDE:
+            # ソフトリミッティング（急激な変化を避ける）
+            if sample > 0:
+                limited_sample = int(MAX_AMPLITUDE + (sample - MAX_AMPLITUDE) * LIMITER_RATIO)
+                limited_sample = min(limited_sample, 32767)  # 16bit上限
+            else:
+                limited_sample = int(-MAX_AMPLITUDE + (sample + MAX_AMPLITUDE) * LIMITER_RATIO)
+                limited_sample = max(limited_sample, -32768)  # 16bit下限
+        else:
+            limited_sample = sample
+        
+        limited_samples.append(limited_sample)
+    
+    # 16bit signed integerの配列をバイトデータに変換
+    return struct.pack(f'<{len(limited_samples)}h', *limited_samples)
+
 # グローバルなエコーキャンセラーインスタンス
 echo_canceller = EchoCanceller()
 
@@ -111,6 +151,8 @@ def send_audio(sock):
             data = rec_process.stdout.read(BUFFER_SIZE)
             if not data:
                 break
+
+            data = apply_volume_limiter0(data)
 
             # エコーキャンセラに送信音声を記録
             echo_canceller.add_sent_audio(data)
