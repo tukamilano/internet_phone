@@ -77,6 +77,10 @@ def plot_wave(amplitudes, timestamps):
     if not amplitudes:
         print("プロットするデータがありません。")
         return
+    
+    avg_amplitude = sum(amplitudes) / len(amplitudes)
+    print(f"平均RMS振幅: {avg_amplitude:.2f}")
+    
     plt.figure(figsize=(8, 4))
     plt.plot(timestamps, amplitudes)
     plt.xlabel("Time (s)")
