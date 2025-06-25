@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>2台PC用 WebRTC音声通話テスト (軸ラベル付きグラフ)</title>
+    <style>
+        body { font-family: sans-serif; max-width: 900px; margin: 20px auto; line-height: 1.6; }
+        .main-container { display: flex; gap: 2em; }
+        .column { flex: 1; padding: 1em; background-color: #f4f4f4; border-radius: 8px; }
+        h2 { border-bottom: 2px solid #ccc; padding-bottom: 0.5em; }
+        textarea { width: 100%; height: 150px; margin: 0.5em 0; font-size: 0.9em; box-sizing: border-box; }
+        button { width: 100%; padding: 10px; font-size: 16px; margin-bottom: 1em; cursor: pointer; }
+        .instructions { font-size: 0.9em; background-color: #e6f7ff; padding: 10px; border-left: 5px solid #1890ff; margin-bottom: 1em;}
+        #sdp-section { display: none; margin-top: 1em; }
+        fieldset { border: 1px solid #ccc; padding: 10px; margin: 20px 0; display: none; }
+        legend { font-weight: bold; }
+        #aecStatus { font-weight: bold; text-align: center; padding: 5px; border-radius: 4px; }
+        #aecStatus.on { background-color: #d9f7be; color: #389e0d; }
+        #aecStatus.off { background-color: #fff1f0; color: #cf1322; }
+        #graph-container { margin-top: 20px; text-align: center; display: none; }
+        /* ★★★ グラフと軸ラベルを配置するためのスタイルを追加 ★★★ */
+        #graph-wrapper { position: relative; display: inline-block; }
+        .axis-label-y {
+            position: absolute;
+            top: 50%;
+            left: -35px;
+            transform: translateY(-50%) rotate(-90deg);
+            color: #333;
+            font-size: 14px;
+        }
+        canvas { border: 1px solid #ccc; background-color: #fff; }
+        #saveGraphBtn { width: auto; background-color: #28a745; color: white; border: none; border-radius: 5px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>2台PC用 WebRTC音声通話テスト (軸ラベル付きグラフ)</h1>
+
+    <div class="main-container">
+        <div class="column" id="columnA">
+            <h2>PC A (先に操作する人)</h2>
+            <div class="instructions"><ol><li>「1. Offerを作成」を押す。</li><li>「自分のSDP」のテキストを全てコピーし、PC Bの人に送る。</li><li>PC Bから「Answer」が送られてきたら、「相手のSDP」に貼り付ける。</li><li>「3. 接続」を押して通話開始。</li></ol></div>
+            <button id="createOfferBtn">1. Offerを作成</button>
+            <button id="connectBtnA">3. 接続</button>
+        </div>
+        <div class="column" id="columnB">
+            <h2>PC B (後に操作する人)</h2>
+            <div class="instructions"><ol><li>PC Aから「Offer」が送られてきたら、「相手のSDP」に貼り付ける。</li><li>「2. Answerを作成」を押す。</li><li>「自分のSDP」のテキストを全てコピーし、PC Aの人に送り返す。</li></ol></div>
+            <button id="createAnswerBtn">2. Answerを作成</button>
+        </div>
+    </div>
+
+    <fieldset id="aecControls">
+        <legend>自分のマイク設定</legend>
+        <p>エコーキャンセリング: <label><input type="radio" name="aec" value="true" checked> ON</label> <label><input type="radio" name="aec" value="false"> OFF</label></p>
+        <div id="aecStatus">AEC: ON</div>
+    </fieldset>
+    
+    <div id="graph-container">
+        <h3>受信音声の波形グラフ</h3>
+        <div id="graph-wrapper">
+            <div class="axis-label-y">振幅 (Amplitude)</div>
+            <canvas id="audioCanvas" width="800" height="200"></canvas>
+        </div>
+        <p>時間 (Time)</p>
+        <button id="saveGraphBtn">グラフを画像として保存</button>
+    </div>
+
+    <div id="sdp-section">
+        <h3>自分のSDP (これをコピーして相手に送る):</h3><textarea id="localSdp" readonly></textarea>
+        <h3>相手のSDP (相手から貰ったものを貼り付ける):</h3><textarea id="remoteSdp"></textarea>
+    </div>
+
+    <audio id="remoteAudio" autoplay></audio>
+
+    <script>
+        // --- UI要素の取得 (変更なし) ---
+        const createOfferBtn = document.getElementById('createOfferBtn');
+        const createAnswerBtn = document.getElementById('createAnswerBtn');
+        const connectBtnA = document.getElementById('connectBtnA');
+        const localSdp = document.getElementById('localSdp');
+        const remoteSdp = document.getElementById('remoteSdp');
+        const remoteAudio = document.getElementById('remoteAudio');
+        const aecControls = document.getElementById('aecControls');
+        const aecRadios = document.querySelectorAll('input[name="aec"]');
+        const aecStatus = document.getElementById('aecStatus');
+        const graphContainer = document.getElementById('graph-container');
+        const canvas = document.getElementById('audioCanvas');
+        const canvasCtx = canvas.getContext('2d');
+        const saveGraphBtn = document.getElementById('saveGraphBtn');
+        
+        // --- WebRTCの設定 (変更なし) ---
+        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }, { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }] };
+        
+        // --- グローバル変数 (変更なし) ---
+        let pc; let localStream; let analyser; let dataArray; let waveformHistory = []; const graphDurationSeconds = 60;
+
+        // ★★★ グラフ描画関数に軸ラベル描画を追加 ★★★
+        function drawWaveform() {
+            requestAnimationFrame(drawWaveform);
+            if (!analyser) return;
+
+            analyser.getFloatTimeDomainData(dataArray);
+            let min = 1.0, max = -1.0;
+            for (const sample of dataArray) { if (sample < min) min = sample; if (sample > max) max = sample; }
+            if (max > -1.0 && min < 1.0 && (max - min) > 0.01) {
+                 const now = Date.now();
+                 waveformHistory.push({ time: now, min: min, max: max });
+            }
+            const cutoffTime = Date.now() - graphDurationSeconds * 1000;
+            while (waveformHistory.length > 0 && waveformHistory[0].time < cutoffTime) { waveformHistory.shift(); }
+
+            canvasCtx.fillStyle = '#f8f9fa';
+            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // --- ここから軸と目盛りの描画 ---
+            canvasCtx.strokeStyle = '#ced4da';
+            canvasCtx.lineWidth = 1;
+            // 中央線
+            canvasCtx.beginPath();
+            canvasCtx.moveTo(0, canvas.height / 2);
+            canvasCtx.lineTo(canvas.width, canvas.height / 2);
+            canvasCtx.stroke();
+            // 時間軸の目盛り線
+            canvasCtx.beginPath();
+            canvasCtx.moveTo(canvas.width / 2, 0);
+            canvasCtx.lineTo(canvas.width / 2, canvas.height);
+            canvasCtx.stroke();
+
+            // 軸の目盛りラベルを描画
+            canvasCtx.fillStyle = '#6c757d';
+            canvasCtx.font = '12px sans-serif';
+            canvasCtx.textAlign = 'center';
+            canvasCtx.fillText('-30s', canvas.width / 2, canvas.height - 5);
+            canvasCtx.fillText('Now', canvas.width - 20, canvas.height - 5);
+            canvasCtx.textAlign = 'left';
+            canvasCtx.fillText('+1.0', 5, 15);
+            canvasCtx.fillText('0.0', 5, canvas.height / 2 + 12);
+            canvasCtx.fillText('-1.0', 5, canvas.height - 5);
+            // --- 軸と目盛りの描画ここまで ---
+
+            // 波形を描画
+            canvasCtx.strokeStyle = '#007bff';
+            canvasCtx.lineWidth = 1;
+            for (const record of waveformHistory) {
+                const x = ((record.time - cutoffTime) / (graphDurationSeconds * 1000)) * canvas.width;
+                const y_max = (canvas.height / 2) - (record.max * canvas.height / 2);
+                const y_min = (canvas.height / 2) - (record.min * canvas.height / 2);
+                canvasCtx.beginPath();
+                canvasCtx.moveTo(x, y_min);
+                canvasCtx.lineTo(x, y_max);
+                canvasCtx.stroke();
+            }
+        }
+        
+        async function switchAEC(isAECEnabled) { if (!pc || !localStream) return; try { const newStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: isAECEnabled } }); const newAudioTrack = newStream.getAudioTracks()[0]; const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio'); if (sender) { await sender.replaceTrack(newAudioTrack); localStream.getTracks().forEach(track => track.stop()); localStream = newStream; aecStatus.textContent = `AEC: ${isAECEnabled ? 'ON' : 'OFF'}`; aecStatus.className = isAECEnabled ? 'on' : 'off'; } } catch (err) { console.error('マイクの切り替えに失敗しました:', err); alert('マイクの切り替えに失敗しました。コンソールを確認してください。'); } }
+        async function start() { try { localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } }); pc = new RTCPeerConnection(configuration); pc.ontrack = (event) => { if (remoteAudio.srcObject !== event.streams[0]) { remoteAudio.srcObject = event.streams[0]; const audioContext = new AudioContext(); const source = audioContext.createMediaStreamSource(event.streams[0]); analyser = audioContext.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.1; dataArray = new Float32Array(analyser.frequencyBinCount); source.connect(analyser); graphContainer.style.display = 'block'; drawWaveform(); } }; localStream.getTracks().forEach(track => pc.addTrack(track, localStream)); } catch (err) { console.error('マイクへのアクセスに失敗:', err); } }
+        saveGraphBtn.onclick = () => { const link = document.createElement('a'); const timestamp = new Date().toISOString().replace(/:/g, '-'); link.download = `waveform-${timestamp}.png`; link.href = canvas.toDataURL('image/png'); link.click(); };
+        createOfferBtn.onclick = async () => { document.getElementById('columnB').style.display = 'none'; document.getElementById('columnA').style.width = '100%'; document.getElementById('sdp-section').style.display = 'block'; await start(); pc.onicecandidate = e => { if (!e.candidate) localSdp.value = JSON.stringify(pc.localDescription); }; const offer = await pc.createOffer(); await pc.setLocalDescription(offer); alert('「自分のSDP」をコピーして相手に送ってください。'); };
+        connectBtnA.onclick = async () => { if (!remoteSdp.value) return alert('相手のSDPを貼り付けてください。'); try { await pc.setRemoteDescription(JSON.parse(remoteSdp.value)); aecControls.style.display = 'block'; alert('接続完了。通話を開始します。'); } catch (err) { console.error('Answerの設定に失敗:', err); alert('相手のSDPの形式が正しくないようです。もう一度確認してください。'); } };
+        createAnswerBtn.onclick = async () => { document.getElementById('columnA').style.display = 'none'; document.getElementById('columnB').style.width = '100%'; document.getElementById('sdp-section').style.display = 'block'; if (!remoteSdp.value) return alert('相手のSDPを貼り付けてください。'); await start(); pc.onicecandidate = e => { if (!e.candidate) localSdp.value = JSON.stringify(pc.localDescription); }; try { await pc.setRemoteDescription(JSON.parse(remoteSdp.value)); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer); aecControls.style.display = 'block'; } catch (err) { console.error('Offerの設定またはAnswerの作成に失敗:', err); alert('相手のSDPの形式が正しくないようです。もう一度確認してください。'); } };
+        aecRadios.forEach(radio => { radio.onchange = (event) => { if (event.target.checked) switchAEC(event.target.value === 'true'); }; });
+    </script>
+</body>
+</html>

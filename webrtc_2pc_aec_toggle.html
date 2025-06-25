@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>2台PC用 WebRTC音声通話テスト (AEC切替機能付き)</title>
+    <style>
+        body { font-family: sans-serif; max-width: 900px; margin: 20px auto; line-height: 1.6; }
+        .main-container { display: flex; gap: 2em; }
+        .column { flex: 1; padding: 1em; background-color: #f4f4f4; border-radius: 8px; }
+        h2 { border-bottom: 2px solid #ccc; padding-bottom: 0.5em; }
+        textarea { width: 100%; height: 150px; margin: 0.5em 0; font-size: 0.9em; }
+        button { width: 100%; padding: 10px; font-size: 16px; margin-bottom: 1em; cursor: pointer; }
+        .instructions { font-size: 0.9em; background-color: #e6f7ff; padding: 10px; border-left: 5px solid #1890ff; margin-bottom: 1em;}
+        #sdp-section { display: none; margin-top: 1em; }
+        fieldset { border: 1px solid #ccc; padding: 10px; margin: 20px 0; display: none; }
+        legend { font-weight: bold; }
+        #aecStatus { font-weight: bold; text-align: center; padding: 5px; border-radius: 4px; }
+        #aecStatus.on { background-color: #d9f7be; color: #389e0d; }
+        #aecStatus.off { background-color: #fff1f0; color: #cf1322; }
+    </style>
+</head>
+<body>
+    <h1>2台PC用 WebRTC音声通話テスト (AEC切替機能付き)</h1>
+
+    <div class="main-container">
+        <div class="column" id="columnA">
+            <h2>PC A (先に操作する人)</h2>
+            <div class="instructions">
+                <ol>
+                    <li>「1. Offerを作成」を押す。</li>
+                    <li>「自分のSDP」のテキストを全てコピーし、PC Bの人に送る。</li>
+                    <li>PC Bから「Answer」が送られてきたら、「相手のSDP」に貼り付ける。</li>
+                    <li>「3. 接続」を押して通話開始。</li>
+                </ol>
+            </div>
+            <button id="createOfferBtn">1. Offerを作成</button>
+            <button id="connectBtnA">3. 接続</button>
+        </div>
+
+        <div class="column" id="columnB">
+            <h2>PC B (後に操作する人)</h2>
+            <div class="instructions">
+                <ol>
+                    <li>PC Aから「Offer」が送られてきたら、「相手のSDP」に貼り付ける。</li>
+                    <li>「2. Answerを作成」を押す。</li>
+                    <li>「自分のSDP」のテキストを全てコピーし、PC Aの人に送り返す。</li>
+                </ol>
+            </div>
+            <button id="createAnswerBtn">2. Answerを作成</button>
+        </div>
+    </div>
+
+    <fieldset id="aecControls">
+        <legend>自分のマイク設定</legend>
+        <p>エコーキャンセリング: 
+           <label><input type="radio" name="aec" value="true" checked> ON</label>
+           <label><input type="radio" name="aec" value="false"> OFF</label>
+        </p>
+        <div id="aecStatus">AEC: ON</div>
+    </fieldset>
+
+    <div id="sdp-section">
+        <h3>自分のSDP (これをコピーして相手に送る):</h3>
+        <textarea id="localSdp" readonly></textarea>
+        <h3>相手のSDP (相手から貰ったものを貼り付ける):</h3>
+        <textarea id="remoteSdp"></textarea>
+    </div>
+
+    <audio id="remoteAudio" autoplay></audio>
+
+    <script>
+        // --- UI要素の取得 ---
+        const createOfferBtn = document.getElementById('createOfferBtn');
+        const createAnswerBtn = document.getElementById('createAnswerBtn');
+        const connectBtnA = document.getElementById('connectBtnA');
+        const localSdp = document.getElementById('localSdp');
+        const remoteSdp = document.getElementById('remoteSdp');
+        const remoteAudio = document.getElementById('remoteAudio');
+        const aecControls = document.getElementById('aecControls');
+        const aecRadios = document.querySelectorAll('input[name="aec"]');
+        const aecStatus = document.getElementById('aecStatus');
+
+        // --- WebRTCの設定 ---
+        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        let pc;
+        let localStream;
+        
+        // --- AEC設定を切り替える関数 ---
+        async function switchAEC(isAECEnabled) {
+            if (!pc || !localStream) return;
+
+            // 新しい制約でマイクストリームを取得
+            const newStream = await navigator.mediaDevices.getUserMedia({
+                audio: { echoCancellation: isAECEnabled }
+            });
+            const newAudioTrack = newStream.getAudioTracks()[0];
+
+            // RTCPeerConnectionのSenderを見つけてトラックを差し替える
+            const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+            if (sender) {
+                await sender.replaceTrack(newAudioTrack);
+                
+                // 古いストリームのトラックを停止
+                localStream.getTracks().forEach(track => track.stop());
+                // 新しいストリームを保持
+                localStream = newStream;
+                
+                console.log(`エコーキャンセリングを ${isAECEnabled ? 'ON' : 'OFF'} に切り替えました。`);
+                aecStatus.textContent = `AEC: ${isAECEnabled ? 'ON' : 'OFF'}`;
+                aecStatus.className = isAECEnabled ? 'on' : 'off';
+            }
+        }
+        
+        // --- WebRTCの初期化 ---
+        async function start() {
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } }); // 初期値はON
+            pc = new RTCPeerConnection(configuration);
+            pc.ontrack = (event) => {
+                if (remoteAudio.srcObject !== event.streams[0]) {
+                    remoteAudio.srcObject = event.streams[0];
+                }
+            };
+            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+        }
+        
+        // --- イベントリスナー ---
+        createOfferBtn.onclick = async () => {
+            document.getElementById('columnB').style.display = 'none';
+            document.getElementById('columnA').style.width = '100%';
+            document.getElementById('sdp-section').style.display = 'block';
+            await start();
+            pc.onicecandidate = e => { if (!e.candidate) localSdp.value = JSON.stringify(pc.localDescription); };
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            alert('「自分のSDP」をコピーして相手に送ってください。');
+        };
+
+        connectBtnA.onclick = async () => {
+            if (!remoteSdp.value) return alert('相手のSDPを貼り付けてください。');
+            await pc.setRemoteDescription(JSON.parse(remoteSdp.value));
+            aecControls.style.display = 'block';
+            alert('接続完了。通話を開始します。');
+        };
+
+        createAnswerBtn.onclick = async () => {
+            document.getElementById('columnA').style.display = 'none';
+            document.getElementById('columnB').style.width = '100%';
+            document.getElementById('sdp-section').style.display = 'block';
+            if (!remoteSdp.value) return alert('相手のSDPを貼り付けてください。');
+            await start();
+            pc.onicecandidate = e => { if (!e.candidate) localSdp.value = JSON.stringify(pc.localDescription); };
+            await pc.setRemoteDescription(JSON.parse(remoteSdp.value));
+
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            aecControls.style.display = 'block';
+            alert('「自分のSDP」をコピーして相手に送り返してください。接続は相手が「3.接続」を押したときに完了します。');
+        };
+
+        aecRadios.forEach(radio => {
+            radio.onchange = (event) => {
+                if (event.target.checked) {
+                    switchAEC(event.target.value === 'true');
+                }
+            };
+        });
+    </script>
+</body>
+</html>
