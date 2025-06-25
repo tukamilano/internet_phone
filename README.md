@@ -32,5 +32,3 @@ e.pyで普通に会話をしてみる. 音量maxで会話したとき1回は自�
 
 # 考察
 Day_9のb.pyではビープ音のエコーを調べようと考えたが, ビープ音のエコーよりもノイズのエコーの方が影響が大きかったのでノイズのエコーに対してエコーキャンセラを実装することにしました
-
-[エコーキャンセラの記録](https://docs.google.com/document/d/1KQZBqWZMnvDEzkBFvjwYEJaGK_V1N0ipil3UFZmOlAo/edit?usp=sharing)
